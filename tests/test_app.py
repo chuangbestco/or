@@ -1,4 +1,5 @@
 import asyncio
+import csv
 import sys
 from pathlib import Path
 
@@ -47,4 +48,29 @@ def test_adspower_request_retries_rate_limit():
             result = await main.adspower_request(client, 'http://ads.local/api/v1/user/list', {}, 'test')
         assert calls == 2
         assert result['code'] == 0
+    asyncio.run(case())
+
+
+def test_job_with_backfill_error_still_generates_downloadable_csv(tmp_path, monkeypatch):
+    async def case():
+        monkeypatch.setattr(main, 'UPLOADS', tmp_path / 'uploads')
+        monkeypatch.setattr(main, 'OUTPUTS', tmp_path / 'outputs')
+        main.UPLOADS.mkdir()
+        main.OUTPUTS.mkdir()
+        token = 'upload-token'
+        headers = ['account_id', 'AK', 'MK', 'bank_card_tail', 'register_time', 'register_ip', 'charge_ip', 'remark']
+        (main.UPLOADS / f'{token}.bin').write_text(','.join(headers) + '\nuser@example.com,ak,mk,1234,,,,\n', encoding='utf-8')
+        (main.UPLOADS / f'{token}.json').write_text('{"filename":"accounts.csv"}', encoding='utf-8')
+
+        async def profiles(_settings): return []
+        monkeypatch.setattr(main, 'adspower_profiles', profiles)
+        job = {'status': 'queued', 'phase': '', 'total': 0, 'completed': 0, 'message': '', 'report': None}
+        await main.run_job(job, token, {'base_url': 'http://ads.local', 'api_key': 'test'})
+
+        assert job['status'] == 'error'
+        assert job['report']['errors'][0]['account_id'] == 'user@example.com'
+        assert job['download_url'].endswith('accounts-已回填注册时间IP卡尾.csv')
+        output = main.OUTPUTS / 'accounts-已回填注册时间IP卡尾.csv'
+        assert output.exists()
+        assert list(csv.DictReader(output.open(encoding='utf-8-sig'))) [0]['account_id'] == 'user@example.com'
     asyncio.run(case())

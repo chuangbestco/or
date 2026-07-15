@@ -167,15 +167,16 @@ async def run_job(job: dict, token: str, settings: dict):
                 if remaining<1: report['low_balance'].append({'row':completed+1,'account_id':account,'balance':remaining})
             except AppError as e: report['errors'].append({'row':completed+1,'account_id':account,'error':str(e)})
             update_job(job,completed=completed)
-        if report['errors'] or report['low_balance']:
-            details=f"回填异常 {len(report['errors'])} 个；余额低于 1：{len(report['low_balance'])} 个。"
-            update_job(job,status='error',phase='任务未完成',message=details,report=report); return
         out=OUTPUTS/f'{Path(filename).stem}-已回填注册时间IP卡尾.csv'
         with out.open('w',encoding='utf-8-sig',newline='') as f:
             w=csv.DictWriter(f,fieldnames=headers); w.writeheader(); w.writerows(rows)
         with out.open(encoding='utf-8-sig',newline='') as f: saved=list(csv.DictReader(f))
         if len(saved)!=len(rows): raise AppError('输出文件重新读取验证失败。')
-        update_job(job,status='success',phase='处理完成',message='全部账号回填完成，且余额均不低于 1。',report=report,download_url='/api/download/'+out.name)
+        download_url='/api/download/'+out.name
+        if report['errors'] or report['low_balance']:
+            details=f"回填异常 {len(report['errors'])} 个；余额低于 1：{len(report['low_balance'])} 个。已生成 CSV，可下载核对部分回填结果。"
+            update_job(job,status='error',phase='任务存在回填异常',message=details,report=report,download_url=download_url); return
+        update_job(job,status='success',phase='处理完成',message='全部账号回填完成，且余额均不低于 1。',report=report,download_url=download_url)
     except Exception as e:
         update_job(job,status='error',phase='任务失败',message=str(e))
 

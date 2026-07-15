@@ -1,6 +1,6 @@
 # OR 账号信息回填 Web
 
-本地 FastAPI 工具：校验 AdsPower 连接、回填 OpenRouter 账号注册时间/IP/卡尾、检查余额，并在成功后提供 CSV 下载。
+本地 FastAPI 工具：校验 AdsPower 连接、回填 OpenRouter 账号注册时间/IP/卡尾、检查余额，并提供 CSV 下载；即使部分账号回填异常，也会保留已完成的行并提供 CSV 下载及逐项错误信息。
 
 ## 启动
 
@@ -16,7 +16,7 @@ cd or
 
 1. 首次填写 AdsPower 连接地址和 API Key，点击“保存并校验连接”。信息只保存在**当前电脑**的 `~/.or-account-info-backfill/settings.json`，权限为仅当前用户可读写；后续启动自动读取。需要更换配置时，在页面重新填写并保存即可。
 2. 上传 CSV / XLSX：必须包含 `account_id`、`AK`、`MK`、`bank_card_tail` 的实际内容，以及 `register_time`、`register_ip`、`charge_ip`、`remark` 表头。
-3. 点击“执行回填”，查看实时进度。全部账号回填成功且余额均不低于 1 后，显示“下载csv”。
+3. 点击“执行回填”，查看实时进度。完成后始终可下载 CSV；如果存在回填异常，页面会逐行列出账号与错误原因，CSV 会保留已成功回填的内容，便于核对或补充处理。
 
 ## 安全和本地性
 
