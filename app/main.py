@@ -1,5 +1,7 @@
 from __future__ import annotations
+import asyncio
 import csv, io, json, re, shutil, uuid
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,13 @@ REQUIRED_VALUES = ('account_id', 'ak', 'mk', 'bank_card_tail')
 REQUIRED_HEADERS = (*REQUIRED_VALUES, 'register_time', 'register_ip', 'charge_ip', 'remark')
 
 class AppError(Exception): pass
+
+# AdsPower `/api/v1/user/list` is limited to one request per second.
+# This process-wide lock protects both the "test connection" and "process" endpoints.
+_ADSPOWER_LOCK = asyncio.Lock()
+_ADSPOWER_LAST_REQUEST = 0.0
+ADSPOWER_MIN_INTERVAL = 1.15
+ADSPOWER_RATE_RETRIES = 3
 
 def norm(v: Any) -> str: return str(v or '').strip()
 def norm_header(v: Any) -> str: return norm(v).lower()
@@ -66,6 +75,31 @@ def validation(headers: list[str], rows: list[dict[str,str]]) -> dict:
     ok=bool(rows) and not missing_headers and not empty
     return {'valid':ok,'row_count':len(rows),'headers':headers,'missing_headers':missing_headers,'empty_required_values':empty,'message':'文件字段与实际内容校验成功，可执行回填。' if ok else '文件校验未通过：' + ('缺少表头：'+ '、'.join(missing_headers)+'。' if missing_headers else '') + ('必填字段为空：'+ '；'.join(f'{k} 第{",".join(v)}行' for k,v in empty.items())+'。' if empty else '') + ('文件没有数据行。' if not rows else '')}
 
+async def adspower_request(client: httpx.AsyncClient, url: str, params: dict, api_key: str) -> dict:
+    """Serialize requests, wait 1.15s, and retry AdsPower's transient rate-limit reply."""
+    global _ADSPOWER_LAST_REQUEST
+    async with _ADSPOWER_LOCK:
+        for attempt in range(ADSPOWER_RATE_RETRIES):
+            delay = ADSPOWER_MIN_INTERVAL - (time.monotonic() - _ADSPOWER_LAST_REQUEST)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            resp = await client.get(url, params=params, headers={'Authorization': f'Bearer {api_key}'})
+            _ADSPOWER_LAST_REQUEST = time.monotonic()
+            if resp.status_code != 200:
+                raise AppError(f'AdsPower 连接失败（HTTP {resp.status_code}）。请检查连接地址和 API Key。')
+            try:
+                body = resp.json()
+            except ValueError as e:
+                raise AppError('AdsPower 返回了无法识别的数据。') from e
+            message = norm(body.get('msg') or body.get('message'))
+            if body.get('code') in (0, None):
+                return body
+            if 'Too many request per second' in message and attempt < ADSPOWER_RATE_RETRIES - 1:
+                await asyncio.sleep(ADSPOWER_MIN_INTERVAL * (attempt + 1))
+                continue
+            raise AppError('AdsPower 返回错误：' + message)
+    raise AppError('AdsPower 请求频率受限，请稍后重试。')
+
 async def adspower_profiles(base_url: str, api_key: str) -> list[dict]:
     base=base_url.rstrip('/')
     if not base.startswith(('http://','https://')): raise AppError('AdsPower 连接地址必须以 http:// 或 https:// 开头。')
@@ -73,10 +107,7 @@ async def adspower_profiles(base_url: str, api_key: str) -> list[dict]:
     async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
         page=1
         while True:
-            resp=await client.get(f'{base}/api/v1/user/list',params={'page':page,'page_size':100},headers={'Authorization':f'Bearer {api_key}'})
-            if resp.status_code != 200: raise AppError(f'AdsPower 连接失败（HTTP {resp.status_code}）。请检查连接地址和 API Key。')
-            body=resp.json()
-            if body.get('code') not in (0, None): raise AppError('AdsPower 返回错误：'+norm(body.get('msg') or body.get('message')))
+            body = await adspower_request(client, f'{base}/api/v1/user/list', {'page':page,'page_size':100}, api_key)
             data=body.get('data') or {}; batch=data.get('list') or []
             if not isinstance(batch,list): raise AppError('AdsPower 返回格式异常。')
             profiles.extend(batch)
