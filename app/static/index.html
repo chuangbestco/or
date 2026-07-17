@@ -1,8 +1,93 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OR 账号信息回填</title><link rel="stylesheet" href="/static/style.css"></head>
-<body><main>
-<header><p class="eyebrow">LOCAL TOOL · OPENROUTER</p><h1>账号信息回填</h1><p>校验 AdsPower 连接、回填注册时间/IP/卡尾，并确认所有账号余额不低于 1。</p></header>
-<section><div class="section-title"><h2>1. AdsPower 连接</h2><span id="savedTag" class="tag" hidden>已保存到本机</span></div><div class="grid"><label>连接地址<input id="baseUrl" value="http://127.0.0.1:50325" placeholder="http://127.0.0.1:50325"></label><label>API Key<input id="apiKey" type="password" placeholder="首次使用请填写 API Key"></label></div><button id="saveConn">保存并校验连接</button><div id="connStatus" class="status"></div></section>
-<section><h2>2. 上传与字段校验</h2><p class="hint">支持 CSV / XLSX。须有 account_id、AK、MK、bank_card_tail 的实际内容，并包含 register_time、register_ip、charge_ip、remark 表头。</p><input id="file" type="file" accept=".csv,.xlsx"><div id="fileStatus" class="status"></div></section>
-<section><h2>3. 执行回填</h2><button id="run" disabled>执行回填</button><div id="progressWrap" class="progress-wrap" hidden><div class="progress-meta"><span id="progressText">准备中…</span><strong id="progressPercent">0%</strong></div><div class="progress"><i id="progressBar"></i></div></div><div id="runStatus" class="status"></div><a id="download" class="button-link" hidden>下载csv</a></section>
-</main><script src="/static/app.js"></script></body></html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f5f5f7">
+  <title>OR 账号信息回填</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+  <main class="app-shell">
+    <header class="topbar glass">
+      <a class="brand" href="#overview" aria-label="OR 账号信息回填首页">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>OR <strong>回填工作台</strong></span>
+      </a>
+      <div class="local-status"><span class="status-dot"></span>仅在本机处理</div>
+    </header>
+
+    <section class="hero" id="overview">
+      <div class="hero-copy">
+        <p class="eyebrow">OPENROUTER · ACCOUNT OPERATIONS</p>
+        <h1>账号信息回填，<br><span>一步完成。</span></h1>
+        <p class="lede">连接 AdsPower 后，校验文件字段并回填注册时间、IP 与卡尾；全部账号余额不低于 <b>1</b> 才可下载结果。</p>
+      </div>
+      <aside class="hero-card glass" aria-label="本次处理说明">
+        <div class="hero-card-top"><span>处理规则</span><span class="pill neutral">安全门禁</span></div>
+        <div class="rule-line"><span class="rule-icon">01</span><p><b>先校验</b><small>连接与文件字段均通过后才可执行</small></p></div>
+        <div class="rule-line"><span class="rule-icon">02</span><p><b>再回填</b><small>时间、IP、卡尾与余额逐项核对</small></p></div>
+      </aside>
+    </section>
+
+    <section class="workflow" aria-label="回填流程">
+      <div class="step active"><span>1</span><p>连接验证<small>AdsPower</small></p></div>
+      <i class="workflow-line"></i>
+      <div class="step"><span>2</span><p>文件校验<small>CSV / XLSX</small></p></div>
+      <i class="workflow-line"></i>
+      <div class="step"><span>3</span><p>执行回填<small>结果下载</small></p></div>
+    </section>
+
+    <section class="workspace" aria-label="账号回填操作区">
+      <article class="panel connection-panel" id="connectionPanel">
+        <div class="panel-heading">
+          <div><span class="section-kicker">01 · CONNECTION</span><h2>连接 AdsPower</h2><p>连接信息仅加密保存在本机，首次使用需填写 API Key。</p></div>
+          <span id="savedTag" class="pill success" hidden><span></span>已保存</span>
+        </div>
+        <div class="form-grid">
+          <label class="field"><span>连接地址</span><input id="baseUrl" value="http://127.0.0.1:50325" placeholder="http://127.0.0.1:50325" autocomplete="url"></label>
+          <label class="field"><span>API Key</span><input id="apiKey" type="password" placeholder="首次使用请填写 API Key" autocomplete="off"></label>
+        </div>
+        <div class="panel-action"><button id="saveConn" class="secondary-button"><span class="button-icon">↗</span>保存并验证</button><div id="connStatus" class="status" role="status"></div></div>
+      </article>
+
+      <article class="panel upload-panel" id="uploadPanel">
+        <div class="panel-heading compact">
+          <div><span class="section-kicker">02 · FILE CHECK</span><h2>上传并校验文件</h2><p>支持 CSV / XLSX；系统会先检查必要表头与实际内容。</p></div>
+          <button class="text-button" id="fieldGuide" type="button">字段要求 <span>↗</span></button>
+        </div>
+        <label class="drop-zone" id="dropZone" for="file">
+          <input id="file" type="file" accept=".csv,.xlsx">
+          <span class="upload-orb">↑</span>
+          <span class="drop-title" id="dropTitle">拖放文件到这里，或 <b>选择文件</b></span>
+          <span class="drop-subtitle" id="dropSubtitle">CSV 或 XLSX · 文件只保留在本次本机任务中</span>
+        </label>
+        <div id="fileStatus" class="status" role="status"></div>
+      </article>
+
+      <article class="panel run-panel" id="runPanel">
+        <div class="run-summary">
+          <div><span class="section-kicker">03 · PROCESS</span><h2>执行回填</h2><p id="runHint">请先完成 AdsPower 连接和文件校验。</p></div>
+          <div class="ready-indicator"><span id="readyDot"></span><span id="readyText">等待条件完成</span></div>
+        </div>
+        <div id="progressWrap" class="progress-wrap" hidden aria-live="polite">
+          <div class="progress-meta"><span id="progressText">准备中…</span><strong id="progressPercent">0%</strong></div>
+          <div class="progress"><i id="progressBar"></i></div>
+        </div>
+        <div class="run-bottom"><div id="runStatus" class="status" role="status"></div><div class="run-actions"><a id="download" class="download-link" hidden><span>↓</span>下载已回填文件</a><button id="run" class="primary-button" disabled>开始回填 <span>→</span></button></div></div>
+      </article>
+    </section>
+
+    <footer><span>OR Account Operations</span><span>本机工具 · 数据不上传第三方</span></footer>
+  </main>
+  <dialog id="guideDialog" class="guide-dialog">
+    <div class="dialog-head"><div><span class="section-kicker">FILE REQUIREMENTS</span><h2>文件字段要求</h2></div><button id="closeGuide" aria-label="关闭">×</button></div>
+    <p>必须包含以下表头，其中前四项需要具有实际内容：</p>
+    <div class="field-chips"><span>account_id</span><span>AK</span><span>MK</span><span>bank_card_tail</span><span>register_time</span><span>register_ip</span><span>charge_ip</span><span>remark</span></div>
+    <p class="dialog-note">执行前会进行字段门禁。校验失败时不会调用外部接口或生成结果文件。</p>
+  </dialog>
+  <script src="/static/app.js"></script>
+</body>
+</html>
