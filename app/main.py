@@ -121,17 +121,28 @@ def ip_index(profiles: list[dict]) -> dict[str,list[str]]:
         username=norm(p.get('username')).lower(); host=norm((p.get('user_proxy_config') or {}).get('proxy_host')) or norm(p.get('ip'))
         if username and host: result.setdefault(username,[]).append(host)
     return {k:list(dict.fromkeys(v)) for k,v in result.items()}
-async def key_metadata(mk: str) -> list[dict]:
-    async with httpx.AsyncClient(timeout=35,trust_env=False) as c:
+async def key_metadata(mk: str, client: httpx.AsyncClient | None = None) -> list[dict]:
+    async def fetch(c: httpx.AsyncClient) -> list[dict]:
         r=await c.get('https://openrouter.ai/api/v1/keys',headers={'Authorization':f'Bearer {mk}'})
         if r.status_code!=200: raise AppError(f'OpenRouter MK 查询失败（HTTP {r.status_code}）。')
-        d=r.json(); data=d.get('data',d.get('keys',d)) if isinstance(d,dict) else d
+        try: d=r.json()
+        except ValueError as e: raise AppError('OpenRouter MK 返回了无法识别的数据。') from e
+        data=d.get('data',d.get('keys',d)) if isinstance(d,dict) else d
         return data if isinstance(data,list) else []
-async def balance(key: str) -> float:
-    async with httpx.AsyncClient(timeout=35,trust_env=False) as c:
+    if client: return await fetch(client)
+    async with httpx.AsyncClient(timeout=35,trust_env=False) as owned_client:
+        return await fetch(owned_client)
+
+async def balance(key: str, client: httpx.AsyncClient | None = None) -> float:
+    async def fetch(c: httpx.AsyncClient) -> float:
         r=await c.get('https://openrouter.ai/api/v1/credits',headers={'Authorization':f'Bearer {key}'})
         if r.status_code!=200: raise AppError(f'OpenRouter 余额查询失败（HTTP {r.status_code}）。')
-        d=r.json().get('data',r.json()); return float(d.get('total_credits',0)-d.get('total_usage',0))
+        try: d=r.json().get('data',r.json())
+        except ValueError as e: raise AppError('OpenRouter 余额接口返回了无法识别的数据。') from e
+        return float(d.get('total_credits',0)-d.get('total_usage',0))
+    if client: return await fetch(client)
+    async with httpx.AsyncClient(timeout=35,trust_env=False) as owned_client:
+        return await fetch(owned_client)
 def match(keys: list[dict], ak: str) -> dict|None:
     found=[]
     for k in keys:
@@ -143,6 +154,42 @@ def match(keys: list[dict], ak: str) -> dict|None:
 def job_view(job: dict) -> dict:
     return {k:v for k,v in job.items() if k not in {'_task'}}
 def update_job(job:dict, **values): job.update(values)
+JOB_CONCURRENCY = 8
+
+async def process_account(row_number: int, row: dict[str, str], cols: dict[str, str], ips: dict[str, list[str]], client: httpx.AsyncClient) -> dict:
+    account=norm(row[cols['account_id']]).lower(); ak=norm(row[cols['ak']]); mk=norm(row[cols['mk']])
+    result={'row':row_number,'account_id':account,'errors':[],'time_filled':False,'ip_filled':False,'card_normalized':False,'low_balance':None}
+
+    try:
+        found=match(await key_metadata(mk,client),ak)
+        if not found or not found.get('created_at'): raise AppError('未匹配到唯一 API Key created_at。')
+        row[cols['register_time']]=utc_beijing(norm(found['created_at'])); result['time_filled']=True
+    except Exception as e:
+        result['errors'].append({'stage':'注册时间','error':str(e)})
+
+    try:
+        ipvals=ips.get(account,[])
+        if not ipvals: raise AppError('未找到对应 AdsPower IP。')
+        if len(ipvals)>1: raise AppError('匹配到多个不同 AdsPower IP。')
+        row[cols['register_ip']]=ipvals[0]; result['ip_filled']=True
+    except AppError as e:
+        result['errors'].append({'stage':'注册 IP','error':str(e)})
+
+    try:
+        card_tail=tail4(row[cols['bank_card_tail']])
+        if not card_tail: raise AppError('银行卡号后四位为空或不含数字。')
+        row[cols['bank_card_tail']]=card_tail; result['card_normalized']=True
+    except AppError as e:
+        result['errors'].append({'stage':'银行卡后四位','error':str(e)})
+
+    try:
+        try: remaining=await balance(mk,client)
+        except (AppError, httpx.HTTPError, ValueError): remaining=await balance(ak,client)
+        if remaining<1: result['low_balance']=remaining
+    except Exception as e:
+        result['errors'].append({'stage':'余额检查','error':str(e)})
+    return result
+
 async def run_job(job: dict, token: str, settings: dict):
     try:
         raw=UPLOADS/f'{token}.bin'; meta=UPLOADS/f'{token}.json'
@@ -151,22 +198,26 @@ async def run_job(job: dict, token: str, settings: dict):
         update_job(job,status='running',phase='正在读取 AdsPower 浏览器配置…',total=len(rows),completed=0)
         ips=ip_index(await adspower_profiles(settings)); cols=aliases(headers)
         report={'total_rows':len(rows),'time_filled':0,'ip_filled':0,'card_normalized':0,'errors':[],'low_balance':[]}
-        for completed,row in enumerate(rows,start=1):
-            account=norm(row[cols['account_id']]).lower(); ak=norm(row[cols['ak']]); mk=norm(row[cols['mk']])
-            update_job(job,phase=f'正在处理第 {completed}/{len(rows)} 个账号…',completed=completed-1)
-            try:
-                found=match(await key_metadata(mk),ak)
-                if not found or not found.get('created_at'): raise AppError('未匹配到唯一 API Key created_at')
-                row[cols['register_time']]=utc_beijing(norm(found['created_at'])); report['time_filled']+=1
-                ipvals=ips.get(account,[])
-                if len(ipvals)!=1: raise AppError('AdsPower IP 缺失或重复')
-                row[cols['register_ip']]=ipvals[0]; report['ip_filled']+=1
-                row[cols['bank_card_tail']]=tail4(row[cols['bank_card_tail']]); report['card_normalized']+=1
-                try: remaining=await balance(mk)
-                except AppError: remaining=await balance(ak)
-                if remaining<1: report['low_balance'].append({'row':completed+1,'account_id':account,'balance':remaining})
-            except AppError as e: report['errors'].append({'row':completed+1,'account_id':account,'error':str(e)})
-            update_job(job,completed=completed)
+        completed=0
+        lock=asyncio.Lock()
+
+        async def worker(index: int, row: dict[str, str], client: httpx.AsyncClient):
+            nonlocal completed
+            result=await process_account(index+2,row,cols,ips,client)
+            async with lock:
+                completed+=1
+                report['time_filled']+=int(result['time_filled'])
+                report['ip_filled']+=int(result['ip_filled'])
+                report['card_normalized']+=int(result['card_normalized'])
+                if result['errors']:
+                    report['errors'].append({'row':result['row'],'account_id':result['account_id'],'errors':result['errors']})
+                if result['low_balance'] is not None:
+                    report['low_balance'].append({'row':result['row'],'account_id':result['account_id'],'balance':result['low_balance']})
+                update_job(job,phase=f'正在并发处理账号：已完成 {completed}/{len(rows)}…',completed=completed)
+
+        limits=httpx.Limits(max_connections=JOB_CONCURRENCY,max_keepalive_connections=JOB_CONCURRENCY)
+        async with httpx.AsyncClient(timeout=35,trust_env=False,limits=limits) as client:
+            await asyncio.gather(*(worker(index,row,client) for index,row in enumerate(rows)))
         out=OUTPUTS/f'{Path(filename).stem}-已回填注册时间IP卡尾.csv'
         with out.open('w',encoding='utf-8-sig',newline='') as f:
             w=csv.DictWriter(f,fieldnames=headers); w.writeheader(); w.writerows(rows)
@@ -174,8 +225,8 @@ async def run_job(job: dict, token: str, settings: dict):
         if len(saved)!=len(rows): raise AppError('输出文件重新读取验证失败。')
         download_url='/api/download/'+out.name
         if report['errors'] or report['low_balance']:
-            details=f"回填异常 {len(report['errors'])} 个；余额低于 1：{len(report['low_balance'])} 个。已生成 CSV，可下载核对部分回填结果。"
-            update_job(job,status='error',phase='任务存在回填异常',message=details,report=report,download_url=download_url); return
+            details=f"回填异常 {len(report['errors'])} 个账号；余额低于 1：{len(report['low_balance'])} 个。已生成 CSV，可下载核对部分回填结果。"
+            update_job(job,status='error',phase='任务完成，但存在账号异常',message=details,report=report,download_url=download_url); return
         update_job(job,status='success',phase='处理完成',message='全部账号回填完成，且余额均不低于 1。',report=report,download_url=download_url)
     except Exception as e:
         update_job(job,status='error',phase='任务失败',message=str(e))

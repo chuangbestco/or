@@ -51,26 +51,54 @@ def test_adspower_request_retries_rate_limit():
     asyncio.run(case())
 
 
-def test_job_with_backfill_error_still_generates_downloadable_csv(tmp_path, monkeypatch):
+def test_concurrent_job_reports_stage_errors_and_continues_other_accounts(tmp_path, monkeypatch):
     async def case():
         monkeypatch.setattr(main, 'UPLOADS', tmp_path / 'uploads')
         monkeypatch.setattr(main, 'OUTPUTS', tmp_path / 'outputs')
         main.UPLOADS.mkdir()
         main.OUTPUTS.mkdir()
-        token = 'upload-token'
+        token = 'concurrent-upload'
         headers = ['account_id', 'AK', 'MK', 'bank_card_tail', 'register_time', 'register_ip', 'charge_ip', 'remark']
-        (main.UPLOADS / f'{token}.bin').write_text(','.join(headers) + '\nuser@example.com,ak,mk,1234,,,,\n', encoding='utf-8')
+        rows = '\n'.join([
+            'first@example.com,ak-first,mk-first,1234,,,,',
+            'second@example.com,ak-second,mk-second,5678,,,,',
+            'third@example.com,ak-third,mk-third,9012,,,,',
+        ])
+        (main.UPLOADS / f'{token}.bin').write_text(','.join(headers) + '\n' + rows + '\n', encoding='utf-8')
         (main.UPLOADS / f'{token}.json').write_text('{"filename":"accounts.csv"}', encoding='utf-8')
 
-        async def profiles(_settings): return []
+        async def profiles(_settings):
+            return [{'username': 'first@example.com', 'user_proxy_config': {'proxy_host': '1.1.1.1'}}, {'username': 'third@example.com', 'user_proxy_config': {'proxy_host': '3.3.3.3'}}]
+        active = 0
+        peak_active = 0
+        async def keys(mk, _client=None):
+            nonlocal active, peak_active
+            active += 1
+            peak_active = max(peak_active, active)
+            await asyncio.sleep(0.03)
+            active -= 1
+            if mk == 'mk-second': raise main.AppError('MK 无效')
+            return [{'label': mk.replace('mk', 'ak'), 'created_at': '2026-07-17T00:00:00Z'}]
+        async def credits(_key, _client=None): return 10.0
         monkeypatch.setattr(main, 'adspower_profiles', profiles)
+        monkeypatch.setattr(main, 'key_metadata', keys)
+        monkeypatch.setattr(main, 'balance', credits)
         job = {'status': 'queued', 'phase': '', 'total': 0, 'completed': 0, 'message': '', 'report': None}
         await main.run_job(job, token, {'base_url': 'http://ads.local', 'api_key': 'test'})
 
+        assert peak_active > 1
+        assert job['completed'] == 3
         assert job['status'] == 'error'
-        assert job['report']['errors'][0]['account_id'] == 'user@example.com'
-        assert job['download_url'].endswith('accounts-已回填注册时间IP卡尾.csv')
-        output = main.OUTPUTS / 'accounts-已回填注册时间IP卡尾.csv'
-        assert output.exists()
-        assert list(csv.DictReader(output.open(encoding='utf-8-sig'))) [0]['account_id'] == 'user@example.com'
+        errors = {error['account_id']: error['errors'] for error in job['report']['errors']}
+        assert errors['second@example.com'] == [
+            {'stage': '注册时间', 'error': 'MK 无效'},
+            {'stage': '注册 IP', 'error': '未找到对应 AdsPower IP。'},
+        ]
+        assert job['report']['time_filled'] == 2
+        assert job['report']['ip_filled'] == 2
+        assert job['report']['card_normalized'] == 3
+        output = list(csv.DictReader((main.OUTPUTS / 'accounts-已回填注册时间IP卡尾.csv').open(encoding='utf-8-sig')))
+        assert output[0]['register_time'] == '26/07/17 08:00:00'
+        assert output[1]['register_time'] == ''
+        assert output[2]['register_ip'] == '3.3.3.3'
     asyncio.run(case())
