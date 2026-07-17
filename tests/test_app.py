@@ -25,7 +25,7 @@ def test_homepage_renders():
     response = TestClient(main.app).get('/')
     assert response.status_code == 200
     assert '执行回填' in response.text
-    assert '下载csv' in response.text
+    assert '下载已回填文件' in response.text
 
 
 def test_settings_are_saved_with_owner_only_permissions(tmp_path, monkeypatch):
