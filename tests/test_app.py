@@ -26,6 +26,8 @@ def test_homepage_renders():
     assert response.status_code == 200
     assert '执行回填' in response.text
     assert '下载已回填文件' in response.text
+    assert 'v1.2.0' in response.text
+    assert '2026-07-17' in response.text
 
 
 def test_settings_are_saved_with_owner_only_permissions(tmp_path, monkeypatch):
